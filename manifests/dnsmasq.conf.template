@@ -1,0 +1,22 @@
+# dnsmasq configuration template
+# This file shows the configuration that will be deployed to /etc/dnsmasq.conf on each node.
+# The deploy script will substitute the actual values from config.env.
+
+# Upstream DNS configuration
+resolv-file=/etc/resolv.conf.upstream
+
+# Maximum concurrent DNS forwards
+dns-forward-max=__DNS_FORWARD_MAX__
+
+# Cache size (number of entries)
+cache-size=__CACHE_SIZE__
+
+# Bind to specific interfaces only
+bind-interfaces
+
+# Listen on all interfaces (required for kind)
+listen-address=0.0.0.0
+
+# Query logging (optional, controlled by ENABLE_LOGGING)
+# log-queries
+# log-facility=/var/log/dnsmasq.log

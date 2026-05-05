@@ -1,0 +1,17 @@
+# Kind cluster generated files
+kind-config.yaml
+coredns-backup.yaml
+
+# Runtime state
+*.log
+*.tmp
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
