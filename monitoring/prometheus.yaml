@@ -1,0 +1,257 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get"]
+- nonResourceURLs: ["/metrics"]
+  verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+      evaluation_interval: 10s
+
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+
+    scrape_configs:
+      - job_name: 'dnsmasq'
+        kubernetes_sd_configs:
+        - role: pod
+        relabel_configs:
+        - source_labels: [__meta_kubernetes_pod_label_app]
+          regex: dnsmasq-exporter
+          action: keep
+        - source_labels: [__meta_kubernetes_pod_ip]
+          target_label: __address__
+          replacement: '${1}:9153'
+        - source_labels: [__meta_kubernetes_pod_node_name]
+          target_label: node
+        - source_labels: [__meta_kubernetes_namespace]
+          target_label: namespace
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerts
+  namespace: monitoring
+data:
+  dns-alerts.yml: |
+    groups:
+    - name: dnsmasq.availability
+      rules:
+      - alert: DnsmasqDown
+        expr: dnsmasq_up{job="dnsmasq"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "dnsmasq down on {{ $labels.node }}"
+          description: "dnsmasq on node {{ $labels.node }} is not responding to CHAOS TXT queries for more than 1 minute."
+
+      - alert: DnsmasqExporterDown
+        expr: up{job="dnsmasq"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "dnsmasq-exporter unreachable on {{ $labels.node }}"
+          description: "dnsmasq-exporter on node {{ $labels.node }} has been unreachable for more than 1 minute."
+
+    - name: dnsmasq.cache
+      rules:
+      - alert: DnsmasqCacheHitRateLow
+        expr: |
+          rate(dnsmasq_cache_hits_total{job="dnsmasq"}[10m])
+          /
+          (
+            rate(dnsmasq_cache_hits_total{job="dnsmasq"}[10m])
+            +
+            rate(dnsmasq_cache_misses_total{job="dnsmasq"}[10m])
+          )
+          < 0.5
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Low dnsmasq cache hit rate on {{ $labels.node }}"
+          description: "dnsmasq cache hit rate on {{ $labels.node }} is below 50% over 10 minutes. Current: {{ $value | humanizePercentage }}."
+
+      - alert: DnsmasqCacheEvictionsHigh
+        expr: |
+          rate(dnsmasq_cache_evictions_total{job="dnsmasq"}[5m]) > 10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High cache eviction rate on {{ $labels.node }}"
+          description: "dnsmasq on {{ $labels.node }} is evicting more than 10 entries/sec. Consider increasing cache size. Current: {{ $value | humanize }}/s."
+
+    - name: dnsmasq.queries
+      rules:
+      - alert: DnsmasqHighForwardRate
+        expr: |
+          sum by (node) (rate(dnsmasq_forwards_total{job="dnsmasq"}[5m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High forward rate on {{ $labels.node }}"
+          description: "dnsmasq on {{ $labels.node }} is forwarding more than 100 queries/sec to upstream. This may indicate low cache effectiveness. Current: {{ $value | humanize }}/s."
+
+      - alert: DnsmasqNoQueries
+        expr: |
+          rate(dnsmasq_queries_total{job="dnsmasq"}[5m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No DNS queries on {{ $labels.node }}"
+          description: "dnsmasq on {{ $labels.node }} has received no queries for 10 minutes. This may indicate a DNS routing issue."
+
+    - name: dnsmasq.slo
+      rules:
+      # SLI: Cache effectiveness — fraction of responses served from cache or local
+      - record: dnsmasq:cache_hit_ratio:rate5m
+        expr: |
+          rate(dnsmasq_cache_hits_total{job="dnsmasq"}[5m])
+          /
+          (
+            rate(dnsmasq_cache_hits_total{job="dnsmasq"}[5m])
+            +
+            rate(dnsmasq_cache_misses_total{job="dnsmasq"}[5m])
+          )
+
+      # SLI: Local resolution — fraction of responses from cache or local config
+      - record: dnsmasq:local_resolution_ratio:rate5m
+        expr: |
+          (
+            sum by (instance) (rate(dnsmasq_responses_total{job="dnsmasq",source=~"cached|local"}[5m]))
+          )
+          /
+          (
+            sum by (instance) (rate(dnsmasq_responses_total{job="dnsmasq"}[5m]))
+          )
+
+      # SLO breach: dnsmasq availability drops (exporter can't reach dnsmasq)
+      - alert: DnsmasqAvailabilitySLOBreach
+        expr: avg_over_time(dnsmasq_up{job="dnsmasq"}[5m]) < 0.999
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "dnsmasq availability SLO breach on {{ $labels.node }}"
+          description: "dnsmasq availability on {{ $labels.node }} has dropped below 99.9% SLO. Current: {{ $value | humanizePercentage }}."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.53.0
+        args:
+        - "--config.file=/etc/prometheus/prometheus.yml"
+        - "--storage.tsdb.path=/prometheus"
+        - "--storage.tsdb.retention.time=24h"
+        - "--web.enable-lifecycle"
+        ports:
+        - containerPort: 9090
+          name: http
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+        volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus/prometheus.yml
+          subPath: prometheus.yml
+        - name: rules
+          mountPath: /etc/prometheus/rules
+        - name: data
+          mountPath: /prometheus
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9090
+          initialDelaySeconds: 15
+          periodSeconds: 15
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config
+        configMap:
+          name: prometheus-config
+      - name: rules
+        configMap:
+          name: prometheus-alerts
+      - name: data
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  selector:
+    app: prometheus
+  ports:
+  - port: 9090
+    targetPort: 9090
+    name: http

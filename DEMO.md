@@ -1,381 +1,276 @@
 # dnsmasq on Kubernetes Nodes — Demo Guide
 
-**Complete step-by-step walkthrough** for demonstrating node-level DNS caching with dnsmasq.
+Step-by-step presenter guide for demonstrating node-local DNS caching with dnsmasq.
 
-This guide includes:
-- Full demo execution with expected outputs
-- Manual exploration commands
-- Architecture verification steps
-- Troubleshooting procedures
+Two paths available:
+- **Part A** — Kind (local, ~10 minutes)
+- **Part B** — Azure (cloud VMs, ~20 minutes)
 
-> **For a quick overview, see [README.md](README.md)**
+---
 
-## Prerequisites
+## Part A: Kind (Local Demo)
 
-- Docker or Podman installed
-- `kind` and `kubectl` installed (or run `make prereqs`)
-- 10-15 minutes
-
-## Demo Flow
-
-### 1. Configuration
+### Step 0: Prerequisites
 
 ```bash
-# Review and edit configuration
-cat config.env
+# Check prerequisites
+make prereqs
 
-# Key settings:
-# - CLUSTER_NAME: dnsmasq-test
-# - WORKER_COUNT: 2
-# - UPSTREAM_DNS: 8.8.8.8,8.8.4.4
-# - CACHE_SIZE: 1000
-# - ENABLE_LOGGING: true
+# Review configuration
+cat config.env
 ```
 
-### 2. Create Cluster and Deploy dnsmasq
+Key settings:
+- `CLUSTER_NAME=dnsmasq`
+- `DOMAIN=dnsmasq.local`
+- `WORKER_COUNT=2`
+- `CONTAINER_CLI=podman`
+- `UPSTREAM_DNS="8.8.8.8,8.8.4.4"`
+- `CACHE_SIZE=1000`
+
+### Step 1: Create Cluster
 
 ```bash
-# Full automated setup
+make cluster-up
+```
+
+Creates a Kind cluster with 1 control-plane + 2 workers.
+
+### Step 2: Deploy dnsmasq
+
+```bash
+make deploy
+```
+
+What happens:
+1. Installs dnsmasq on each node container
+2. Configures address records for `api.dnsmasq.local`, `api-int.dnsmasq.local`, `*.apps.dnsmasq.local`
+3. Starts dnsmasq daemon on each node
+4. Updates CoreDNS to forward to dnsmasq via `{$HOST_IP}:53`
+5. Reconfigures each node's `/etc/resolv.conf` to use local dnsmasq
+
+### Step 3: Verify DNS
+
+```bash
+make verify
+```
+
+Runs 7 tests on each node:
+1. dnsmasq process running
+2. `api.dnsmasq.local` resolves (address record)
+3. `api-int.dnsmasq.local` resolves (address record)
+4. `myapp.apps.dnsmasq.local` resolves (wildcard address record)
+5. `google.com` forwards to upstream
+6. dnsmasq caching works (cache hit detected)
+7. `/etc/resolv.conf` points to local dnsmasq
+
+### Step 4: Full Demo (Steps 1-3 Combined)
+
+```bash
+# Or run everything at once:
 make demo
 ```
 
-**What happens:**
-1. Creates Kind cluster (1 control-plane + 2 workers)
-2. Deploys dnsmasq as daemon service on each node
-3. Configures CoreDNS to forward to dnsmasq
-4. Runs comprehensive verification tests
-
-**Expected output:**
-```
-════════════════════════════════════════════
-  Kind Cluster Setup
-════════════════════════════════════════════
-
-  Cluster name:  dnsmasq-test
-  Container CLI: docker
-  Workers:       2
-
-[INFO]  Checking prerequisites...
-[OK]    Prerequisites satisfied.
-...
-[OK]    All 3 nodes are ready.
-
-════════════════════════════════════════════
-  dnsmasq Deployment
-════════════════════════════════════════════
-
-[INFO]  Discovered 3 node(s):
-  - dnsmasq-test-control-plane
-  - dnsmasq-test-worker
-  - dnsmasq-test-worker2
-
-[INFO]  --- Deploying to dnsmasq-test-control-plane ---
-  Node IP: 172.18.0.7
-[INFO]    Installing dnsmasq package...
-[OK]      dnsmasq package installed.
-[INFO]    Creating dnsmasq configuration...
-[INFO]    Starting dnsmasq daemon...
-[OK]      dnsmasq is running and listening on port 53.
-...
-[OK]    CoreDNS ConfigMap updated.
-[OK]    HOST_IP environment variable added.
-[OK]    CoreDNS rollout complete.
-
-════════════════════════════════════════════
-  Deployment Complete
-════════════════════════════════════════════
-
-  dnsmasq daemon deployed to all 3 node(s).
-  CoreDNS configured to forward to dnsmasq on each node.
-
-  DNS Flow:
-    Pod → CoreDNS (10s cache) → dnsmasq (TTL cache) → Upstream DNS
-
-════════════════════════════════════════════
-  DNS Verification Tests
-════════════════════════════════════════════
-
-[INFO]  Test 1: Verify dnsmasq service is running on all nodes
-
-  Checking dnsmasq-test-control-plane...
-[OK]        ✓ dnsmasq running
-      PID: 2125
-      Command: /usr/sbin/dnsmasq
-      Listening: port 53 (UDP)
-
-  Explanation:
-  • dnsmasq is running as a daemon service (not a pod) on each node
-  • Each dnsmasq instance listens on port 53 (UDP) on all interfaces
-  • This provides node-local DNS caching for queries from CoreDNS
-
-[INFO]  Test 2: Node-level DNS resolution
-
-  Testing dnsmasq-test-control-plane...
-[OK]        ✓ Resolved google.com
-      Query: nslookup google.com 127.0.0.1 (direct to dnsmasq)
-      Result:
-        → 142.251.43.14
-        → 2404:6800:4009:802::200e
-      Log: May  4 07:23:01 dnsmasq[2125]: reply google.com is 2404:6800:4009:817::200e
-
-  Explanation:
-  • Each node can directly query its local dnsmasq on 127.0.0.1:53
-  • dnsmasq forwards queries to upstream DNS (8.8.8.8,8.8.4.4)
-  • Responses are cached by dnsmasq for future queries (TTL-based)
-  • Different nodes may receive different IPs due to DNS round-robin/geo-location
-
-[INFO]  Test 3: Pod DNS resolution (CoreDNS → dnsmasq chain)
-
-  Testing google.com...
-[OK]        ✓ Resolved google.com
-      Query: nslookup google.com (from pod on dnsmasq-test-worker)
-      DNS Chain: Pod → CoreDNS → dnsmasq (on dnsmasq-test-worker) → Upstream
-      Result:
-        → 142.250.195.14
-      dnsmasq log: May  4 07:23:02 dnsmasq[1164]: cached google.com is 142.250.195.14
-
-  Explanation:
-  • Pod sends DNS query to Kubernetes DNS service (ClusterIP)
-  • CoreDNS receives the query and checks its 10-second cache
-  • On cache miss, CoreDNS forwards to dnsmasq on the SAME node via {HOST_IP}:53
-  • dnsmasq checks its TTL-based cache, then forwards to upstream if needed
-  • Two-layer caching: CoreDNS (L1, 10s) + dnsmasq (L2, TTL-based)
-  • This reduces latency and upstream DNS load significantly
-
-[INFO]  Test 4: Verify dnsmasq caching behavior
-
-[INFO]    Query 1 (cache miss)...
-    Query: nslookup reddit.com 127.0.0.1
-    Result (from upstream):
-      → 151.101.1.140
-      → 151.101.65.140
-
-[INFO]    Query 2 (should be cached)...
-    Query: nslookup reddit.com 127.0.0.1
-    Result (from cache):
-      → 151.101.1.140
-      → 151.101.65.140
-
-[OK]        ✓ First query forwarded to upstream
-[OK]        ✓ Second query served from cache
-
-  dnsmasq logs showing cache behavior:
-    May  4 07:23:03 dnsmasq[2125]: query[A] reddit.com from 127.0.0.1
-    May  4 07:23:03 dnsmasq[2125]: forwarded reddit.com to 8.8.8.8
-    May  4 07:23:03 dnsmasq[2125]: reply reddit.com is 151.101.1.140
-    May  4 07:23:04 dnsmasq[2125]: query[A] reddit.com from 127.0.0.1
-    May  4 07:23:04 dnsmasq[2125]: cached reddit.com is 151.101.1.140
-
-  Explanation:
-  • Query 1: Cache miss → dnsmasq forwards to upstream (8.8.8.8/8.8.4.4)
-  • Query 2: Cache hit → dnsmasq serves from local cache (no upstream query)
-  • Logs show 'forwarded' for cache misses and 'cached' for cache hits
-  • TTL from upstream DNS determines how long entries stay cached
-  • This dramatically reduces DNS query latency (cache: <1ms vs upstream: 10-50ms)
-
-[INFO]  Test 5: Multi-node distribution
-
-  Testing test-dns-1 (on dnsmasq-test-worker2)...
-[OK]        ✓ DNS resolution working
-      Query: nslookup stackoverflow.com
-      DNS Chain: test-dns-1 → CoreDNS → dnsmasq (on dnsmasq-test-worker2) → Upstream
-      Result:
-        → 198.252.206.1
-      dnsmasq log (dnsmasq-test-worker2): May  4 07:23:06 dnsmasq[2495]: reply stackoverflow.com is 198.252.206.1
-
-  Explanation:
-  • Each pod uses CoreDNS on its scheduled node
-  • CoreDNS forwards to dnsmasq on the SAME node (node-local caching)
-  • test-dns-1 on worker2 → uses dnsmasq on worker2
-  • test-dns-2 on worker → uses dnsmasq on worker
-  • This ensures optimal performance with minimal network hops
-  • Each node's dnsmasq maintains its own independent cache
-
-════════════════════════════════════════════
-  Verification Complete
-════════════════════════════════════════════
-
-  ✓ dnsmasq service running on all nodes
-  ✓ Node-level DNS resolution working
-  ✓ Pod DNS resolution working (CoreDNS → dnsmasq)
-  ✓ dnsmasq caching verified
-  ✓ Multi-node distribution working
-```
-
-### 3. Check Status
+### Step 5: Check Status
 
 ```bash
 make status
 ```
 
-**Shows:**
-- Cluster nodes status
-- dnsmasq services on each node
-- CoreDNS pods
+Shows node status, dnsmasq service on each node, and CoreDNS pods.
 
-**Note:** Comprehensive caching verification is included in `make verify` (Test 4), which shows:
-- Cache misses (forwarded to upstream)
-- Cache hits (served from local cache)
-- Detailed dnsmasq logs with timestamps
-- Two-layer caching behavior (CoreDNS + dnsmasq)
-
-### 4. Manual Exploration
+### Step 6: Manual Exploration
 
 ```bash
-# Get node names
-docker ps --filter "name=dnsmasq-test"
+# View dnsmasq configuration on a node
+podman exec dnsmasq-control-plane cat /etc/dnsmasq.conf
 
-# View dnsmasq logs on a node
-docker exec dnsmasq-test-worker cat /var/log/dnsmasq.log
+# View dnsmasq logs (cache hits and misses)
+podman exec dnsmasq-worker cat /var/log/dnsmasq.log
 
 # Follow live queries
-docker exec dnsmasq-test-worker tail -f /var/log/dnsmasq.log
+podman exec dnsmasq-worker tail -f /var/log/dnsmasq.log
 
-# Test DNS from a node directly
-docker exec dnsmasq-test-worker nslookup google.com 127.0.0.1
+# Test DNS directly on a node
+podman exec dnsmasq-worker dig api.dnsmasq.local @<node-ip>
 
-# View dnsmasq process
-docker exec dnsmasq-test-worker ps aux | grep dnsmasq
-
-# Create a test pod and query
+# Test from a pod
 kubectl run testpod --image=busybox:1.36 -- sleep 3600
-kubectl exec testpod -- nslookup github.com
+kubectl exec testpod -- nslookup api.dnsmasq.local
 
-# Check CoreDNS configuration
-kubectl get cm coredns -n kube-system -o yaml | grep -A 10 "forward"
+# Check CoreDNS forwarding config
+kubectl get cm coredns -n kube-system -o yaml | grep -A 5 "forward"
 ```
 
-### 5. View dnsmasq Configuration
-
-```bash
-# On any node
-docker exec dnsmasq-test-worker cat /etc/dnsmasq.conf
-```
-
-**Expected content:**
-```
-resolv-file=/etc/resolv.conf.upstream
-dns-forward-max=10000
-cache-size=1000
-bind-interfaces
-listen-address=0.0.0.0
-log-queries
-log-facility=/var/log/dnsmasq.log
-```
-
-### 6. Observe Query Flow
+### Step 7: Observe Caching
 
 ```bash
 # Terminal 1: Watch dnsmasq logs
-docker exec dnsmasq-test-worker tail -f /var/log/dnsmasq.log
+podman exec dnsmasq-worker tail -f /var/log/dnsmasq.log
 
-# Terminal 2: Make queries
-kubectl exec testpod -- nslookup twitter.com
-kubectl exec testpod -- nslookup facebook.com
-
-# Watch the logs in Terminal 1 show:
-# - "forwarded twitter.com to 8.8.8.8" (first query)
-# - "cached twitter.com is <IP>" (subsequent queries)
+# Terminal 2: Make queries — watch "forwarded" vs "cached" in logs
+kubectl exec testpod -- nslookup github.com
+kubectl exec testpod -- nslookup github.com   # should show "cached"
 ```
 
-### 7. Architecture Verification
+### Step 8: DNS Failover Demo
 
 ```bash
-# Verify CoreDNS forwards to dnsmasq
-kubectl get cm coredns -n kube-system -o yaml | grep -A 5 "forward"
-
-# Should show:
-#   forward . {$HOST_IP}:53 {
-#     max_concurrent 1000
-#     policy sequential
-#     force_tcp
-#   }
-
-# Verify HOST_IP env var in CoreDNS
-kubectl get deploy coredns -n kube-system -o yaml | grep -A 5 "env:"
-
-# Should show:
-#   env:
-#   - name: HOST_IP
-#     valueFrom:
-#       fieldRef:
-#         fieldPath: status.hostIP
+make demo-failover
 ```
 
-### 8. Cleanup
+Four phases:
+1. **Before** — cluster domains AND google.com resolve
+2. **Break** — blocks upstream DNS via iptables on all nodes
+3. **After** — cluster domains STILL resolve (dnsmasq address records), external FAILS
+4. **Restore** — unblocks upstream DNS
+
+### Step 9: Deploy Monitoring
+
+```bash
+make monitoring
+```
+
+Builds the dnsmasq-exporter image, loads it into Kind, and deploys:
+- **dnsmasq-exporter** DaemonSet (hostNetwork, reads /var/log/dnsmasq.log, queries CHAOS TXT records)
+- **Prometheus** (scrapes dnsmasq-exporter pods)
+- **Grafana** (pre-configured datasource + dnsmasq dashboard)
+
+```bash
+# Access Prometheus
+make prometheus-ui    # http://localhost:9090
+
+# Access Grafana
+make grafana-ui       # http://localhost:3000
+```
+
+Grafana dashboard includes:
+- Total QPS, Instances Up, Cache Hit Rate, Cache Size
+- Availability SLI, Local Resolution Rate, Cache Evictions/s
+- Queries by type (A, AAAA, etc.) and by node
+- Responses by source (cached / forwarded / local)
+- Cache hits vs misses, insertions vs evictions
+- Forwards by upstream destination
+
+### Step 10: Explore Prometheus Metrics
+
+```bash
+# In Prometheus UI (http://localhost:9090), try:
+dnsmasq_up
+dnsmasq_cache_size
+dnsmasq_cache_hits_total
+dnsmasq_cache_misses_total
+dnsmasq_queries_total
+dnsmasq_forwards_total
+dnsmasq_responses_total
+```
+
+### Step 11: Check Alerts
+
+In Prometheus UI -> Alerts:
+- `DnsmasqDown` (critical) — dnsmasq not responding for 1m
+- `DnsmasqExporterDown` (critical) — exporter unreachable for 1m
+- `DnsmasqCacheHitRateLow` (info) — cache hit rate < 50% for 10m
+- `DnsmasqCacheEvictionsHigh` (warning) — eviction rate > 10/s for 5m
+- `DnsmasqHighForwardRate` (warning) — forward rate > 100/s for 5m
+- `DnsmasqNoQueries` (warning) — zero queries for 10m
+- `DnsmasqAvailabilitySLOBreach` (critical) — availability < 99.9% for 5m
+
+### Step 12: Cleanup
 
 ```bash
 make clean
 ```
 
-## Summary
+---
 
-### Problem Statement
-- Kubernetes pods make many DNS queries (service discovery, external APIs)
-- Every query goes to upstream DNS (8.8.8.8, cloud DNS)
-- This adds latency and creates external dependencies
-- No caching at the node level by default
+## Part B: Azure (Cloud Demo)
 
-### Solution
-- Deploy dnsmasq as a daemon service on each node
-- CoreDNS forwards to local dnsmasq
-- Two-layer caching:
-  - Layer 1 (CoreDNS): 10s TTL for rapid repeats
-  - Layer 2 (dnsmasq): TTL-based for longer-term caching
+### Step B0: Prerequisites
 
-### Benefits
-- **Performance**: Cached queries served in ~5-10ms instead of ~40-50ms
-- **Reliability**: Survives temporary upstream DNS outages
-- **Cost**: Reduces cloud DNS query costs
-- **Observability**: Query logs on each node
-- **Simplicity**: Daemon service, no external dependencies
+```bash
+# Azure CLI, jq, SSH
+az version
+jq --version
+ssh -V
 
-### Key Technical Details
-- **Daemon service**: Runs directly on node, not as a pod
-- **Port binding**: Listens on port 53 (UDP) on all interfaces (0.0.0.0)
-- **CoreDNS integration**: Uses Downward API for `{$HOST_IP}`
-- **TCP forwarding**: Required for kind (`force_tcp` in CoreDNS)
-- **Per-node deployment**: Each node has its own independent dnsmasq instance
-- **Node-local caching**: Pods query CoreDNS on same node → dnsmasq on same node
+# Login to Azure
+az login
+
+# Review Azure configuration in config.env
+cat config.env
+```
+
+### Step B1: Create Infrastructure
+
+```bash
+make azure-infra
+```
+
+Creates: Resource Group, VNet, Subnet, NSG, Public IPs, VMs.
+
+### Step B2: Install k3s
+
+```bash
+make azure-cluster
+```
+
+Installs k3s server + agents, fetches kubeconfig.
+
+### Step B3: Deploy dnsmasq
+
+```bash
+make azure-deploy
+```
+
+Installs dnsmasq on each VM with address records for cluster domains. Configures `/etc/resolv.conf` to use local dnsmasq.
+
+### Step B4: Verify
+
+```bash
+make azure-verify
+```
+
+Runs 7 tests on each VM via SSH (same as Kind verification).
+
+### Step B5: Failover Demo
+
+```bash
+make azure-failover
+```
+
+Blocks Azure DNS (168.63.129.16). Cluster domains survive. External domains fail.
+
+### Step B6: Teardown
+
+```bash
+make azure-clean
+```
+
+Double-confirms, then deletes the entire resource group.
+
+---
 
 ## Troubleshooting
 
 ### dnsmasq service not starting
 ```bash
-# Check dnsmasq process on node
-docker exec dnsmasq-test-worker ps aux | grep dnsmasq
-
-# Check if port 53 is bound
-docker exec dnsmasq-test-worker netstat -ulnp | grep :53
-
-# View dnsmasq configuration
-docker exec dnsmasq-test-worker cat /etc/dnsmasq.conf
-
-# Restart dnsmasq manually
-docker exec dnsmasq-test-worker killall dnsmasq
-docker exec dnsmasq-test-worker /usr/sbin/dnsmasq
+podman exec <node> ps aux | grep dnsmasq
+podman exec <node> netstat -ulnp | grep :53
+podman exec <node> cat /etc/dnsmasq.conf
+podman exec <node> killall dnsmasq && podman exec <node> /usr/sbin/dnsmasq
 ```
 
 ### DNS queries not reaching dnsmasq
 ```bash
-# Verify CoreDNS configuration
 kubectl get cm coredns -n kube-system -o yaml
-
-# Verify HOST_IP env var
 kubectl get deploy coredns -n kube-system -o yaml | grep -A 5 HOST_IP
-
-# Check CoreDNS logs
 kubectl logs -n kube-system -l k8s-app=kube-dns
 ```
 
 ### No logs appearing
 ```bash
-# Check if logging is enabled
 cat config.env | grep ENABLE_LOGGING
-
-# Check log file
-docker exec dnsmasq-test-worker ls -la /var/log/dnsmasq.log
-
-# Check dnsmasq config
-docker exec dnsmasq-test-worker cat /etc/dnsmasq.conf
+podman exec <node> ls -la /var/log/dnsmasq.log
+podman exec <node> cat /etc/dnsmasq.conf | grep log
 ```

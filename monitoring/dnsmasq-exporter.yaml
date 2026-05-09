@@ -1,0 +1,52 @@
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dnsmasq-exporter
+  namespace: monitoring
+  labels:
+    app: dnsmasq-exporter
+spec:
+  selector:
+    matchLabels:
+      app: dnsmasq-exporter
+  template:
+    metadata:
+      labels:
+        app: dnsmasq-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9153"
+    spec:
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: dnsmasq-exporter
+          image: dnsmasq-exporter:latest
+          imagePullPolicy: Never
+          args:
+            - --listen-addr=:9153
+            - --dnsmasq-addr=127.0.0.1:53
+            - --log-path=/var/log/dnsmasq.log
+          ports:
+            - name: metrics
+              containerPort: 9153
+              hostPort: 9153
+              protocol: TCP
+          volumeMounts:
+            - name: dnsmasq-log
+              mountPath: /var/log/dnsmasq.log
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: dnsmasq-log
+          hostPath:
+            path: /var/log/dnsmasq.log
+            type: FileOrCreate

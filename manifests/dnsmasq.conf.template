@@ -17,6 +17,11 @@ bind-interfaces
 # Listen on all interfaces (required for kind)
 listen-address=0.0.0.0
 
+# Local domain resolution (cluster-critical domains)
+address=/api.__DOMAIN__/__API_IP__
+address=/api-int.__DOMAIN__/__API_IP__
+address=/.apps.__DOMAIN__/__INGRESS_IP__
+
 # Query logging (optional, controlled by ENABLE_LOGGING)
 # log-queries
 # log-facility=/var/log/dnsmasq.log

@@ -4,13 +4,14 @@
 #
 # This script:
 #   1. Discovers all node containers for the given Kind cluster
-#   2. Installs dnsmasq package on each node
-#   3. Creates dnsmasq configuration on each node
+#   2. Discovers the control-plane IP (API server) and first worker IP (Ingress)
+#   3. Installs dnsmasq on each node with domain resolution + caching
 #   4. Starts dnsmasq as a daemon on each node
 #   5. Updates CoreDNS to forward to dnsmasq
+#   6. Reconfigures each node's /etc/resolv.conf to use local dnsmasq
 #
 # Reads configuration from config.env.
-# Usage: ./deploy-dnsmasq.sh
+# Usage: ./deploy-dnsmasq.sh [cluster-name] [container-cli]
 
 set -euo pipefail
 
@@ -20,8 +21,8 @@ source "${SCRIPT_DIR}/common.sh"
 
 load_project_config
 
-CLUSTER_NAME="${CLUSTER_NAME:-dnsmasq-test}"
-CLI="${CONTAINER_CLI:-docker}"
+CLUSTER_NAME="${1:-${CLUSTER_NAME}}"
+CLI="${2:-${CONTAINER_CLI}}"
 UPSTREAM_DNS="${UPSTREAM_DNS:-8.8.8.8,8.8.4.4}"
 CACHE_SIZE="${CACHE_SIZE:-1000}"
 DNS_FORWARD_MAX="${DNS_FORWARD_MAX:-10000}"
@@ -31,6 +32,7 @@ header "dnsmasq Deployment"
 
 echo "  Cluster:       ${CLUSTER_NAME}"
 echo "  Container CLI: ${CLI}"
+echo "  Domain:        ${DOMAIN}"
 echo "  Upstream DNS:  ${UPSTREAM_DNS}"
 echo "  Cache size:    ${CACHE_SIZE}"
 echo "  Logging:       ${ENABLE_LOGGING}"
@@ -50,7 +52,29 @@ info "Discovered ${NODE_COUNT} node(s):"
 echo "$NODES" | while read -r node; do echo "  - ${node}"; done
 echo ""
 
-# ── 2. Deploy to each node ──────────────────────────────────────────
+# ── 2. Discover node IPs ────────────────────────────────────────────
+
+# Control-plane IP serves as the "API server load balancer" IP
+CP_NODE=$(echo "$NODES" | grep "control-plane" | head -1)
+CP_IP=$($CLI inspect "$CP_NODE" \
+    --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)
+
+# First worker IP serves as the "Ingress load balancer" IP
+WORKER_NODE=$(echo "$NODES" | grep -v "control-plane" | head -1 || true)
+if [ -n "$WORKER_NODE" ]; then
+    INGRESS_IP=$($CLI inspect "$WORKER_NODE" \
+        --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)
+else
+    INGRESS_IP="$CP_IP"
+fi
+
+info "IP Assignments (simulating load balancers):"
+echo "  API Server (api.${DOMAIN}):          ${CP_IP}"
+echo "  API Internal (api-int.${DOMAIN}):    ${CP_IP}"
+echo "  Ingress (*.apps.${DOMAIN}):          ${INGRESS_IP}"
+echo ""
+
+# ── 3. Deploy to each node ──────────────────────────────────────────
 
 echo "$NODES" | while read -r NODE; do
     info "--- Deploying to ${NODE} ---"
@@ -79,7 +103,7 @@ echo "$NODES" | while read -r NODE; do
 $(echo "$NAMESERVERS" | while read -r ns; do echo "nameserver $ns"; done)
 EOF"
 
-    # Create dnsmasq configuration
+    # Create dnsmasq configuration with domain resolution
     info "  Creating dnsmasq configuration..."
 
     LOG_CONFIG=""
@@ -88,14 +112,20 @@ EOF"
 log-facility=/var/log/dnsmasq.log"
     fi
 
-    $CLI exec "$NODE" bash -c "cat > /etc/dnsmasq.conf <<'EOF'
+    $CLI exec "$NODE" bash -c "cat > /etc/dnsmasq.conf <<'DNSCONF'
 resolv-file=/etc/resolv.conf.upstream
 dns-forward-max=${DNS_FORWARD_MAX}
 cache-size=${CACHE_SIZE}
 bind-interfaces
 listen-address=0.0.0.0
+
+# Local domain resolution (cluster-critical domains)
+address=/api.${DOMAIN}/${CP_IP}
+address=/api-int.${DOMAIN}/${CP_IP}
+address=/.apps.${DOMAIN}/${INGRESS_IP}
+
 ${LOG_CONFIG}
-EOF"
+DNSCONF"
 
     # Stop any existing dnsmasq processes
     $CLI exec "$NODE" killall dnsmasq 2>/dev/null || true
@@ -124,10 +154,20 @@ EOF"
         error "dnsmasq failed to start on ${NODE}"
     fi
 
+    # Reconfigure DNS to use local dnsmasq
+    $CLI exec "$NODE" sh -c "
+        cat > /etc/resolv.conf <<RESOLV
+nameserver ${NODE_IP}
+nameserver $(echo "$UPSTREAM_DNS" | tr ',' '\n' | head -1)
+search ${DOMAIN}
+RESOLV
+    "
+    info "  /etc/resolv.conf updated: nameserver ${NODE_IP} (local dnsmasq)"
+
     echo ""
 done
 
-# ── 3. Update CoreDNS to forward to dnsmasq ────────────────────────────
+# ── 4. Update CoreDNS to forward to dnsmasq ────────────────────────────
 
 info "Configuring CoreDNS to forward to dnsmasq..."
 
@@ -174,7 +214,7 @@ rm -f /tmp/corefile-patch.yaml
 success "CoreDNS ConfigMap updated."
 echo ""
 
-# ── 4. Add HOST_IP environment variable to CoreDNS ──────────────────────
+# ── 5. Add HOST_IP environment variable to CoreDNS ──────────────────────
 
 info "Adding HOST_IP environment variable to CoreDNS deployment..."
 
@@ -193,7 +233,7 @@ fi
 
 echo ""
 
-# ── 5. Wait for CoreDNS rollout ──────────────────────────────────────────
+# ── 6. Wait for CoreDNS rollout ──────────────────────────────────────────
 
 info "Waiting for CoreDNS rollout to complete..."
 
@@ -204,15 +244,20 @@ kubectl rollout status deployment coredns -n kube-system \
 success "CoreDNS rollout complete."
 echo ""
 
-# ── 6. Summary ──────────────────────────────────────────────────────────
+# ── 7. Summary ──────────────────────────────────────────────────────────
 
 header "Deployment Complete"
 
-echo "  dnsmasq static pods deployed to all ${NODE_COUNT} node(s)."
+echo "  dnsmasq deployed to all ${NODE_COUNT} node(s)."
 echo "  CoreDNS configured to forward to dnsmasq on each node."
 echo ""
+echo "  Domains resolved locally (no external DNS):"
+echo "    api.${DOMAIN}         -> ${CP_IP}"
+echo "    api-int.${DOMAIN}     -> ${CP_IP}"
+echo "    *.apps.${DOMAIN}      -> ${INGRESS_IP}"
+echo ""
 echo "  DNS Flow:"
-echo "    Pod → CoreDNS (10s cache) → dnsmasq (TTL cache) → Upstream DNS"
+echo "    Pod -> CoreDNS (10s cache) -> dnsmasq (TTL cache) -> Upstream DNS"
 echo ""
 echo "  Next step: make verify"
 echo ""

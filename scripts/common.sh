@@ -71,6 +71,24 @@ save_config() {
     local file="$1"; shift
     : > "$file"
     for var in "$@"; do
-        echo "${var}=${!var}" >> "$file"
+        echo "${var}=\"${!var}\"" >> "$file"
     done
+}
+
+# ── SSH helpers (for Azure scripts) ──────────────────────────────────
+
+# ssh_exec HOST COMMAND...
+ssh_exec() {
+    local host="$1"; shift
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -i "${SSH_KEY_PATH}" "${SSH_USER:-azureuser}@${host}" "$@"
+}
+
+# ssh_copy LOCAL_FILE HOST REMOTE_PATH
+ssh_copy() {
+    local src="$1" host="$2" dest="$3"
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -i "${SSH_KEY_PATH}" "$src" "${SSH_USER:-azureuser}@${host}:${dest}"
 }

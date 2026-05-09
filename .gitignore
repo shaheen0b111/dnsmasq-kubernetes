@@ -1,4 +1,9 @@
-# Kind cluster generated files
+# Runtime state (contains IPs discovered during setup)
+.env.kind
+azure/.env
+azure/kubeconfig
+
+# Generated
 kind-config.yaml
 coredns-backup.yaml
 

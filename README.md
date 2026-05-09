@@ -1,87 +1,118 @@
-# dnsmasq on Kubernetes Nodes
+# dnsmasq: Node-Local DNS Caching for Kubernetes
 
-Node-level DNS caching for Kubernetes using dnsmasq as a daemon service.
+A lightweight, observable DNS caching solution for Kubernetes clusters using dnsmasq.
 
-> **📖 For a detailed step-by-step demo with expected outputs, see [DEMO.md](DEMO.md)**
+Every Kubernetes cluster on a public cloud silently depends on the cloud provider's DNS service (Azure DNS at `168.63.129.16`, AWS at `169.254.169.253`). If that service goes down or degrades, DNS latency spikes, queries fail, and the cluster suffers. Every external DNS query adds latency and cost.
 
-## Overview
+This project deploys dnsmasq as a daemon service on every Kubernetes node, providing node-local DNS caching and self-hosted resolution for cluster-critical domains. Two-layer caching (CoreDNS L1 + dnsmasq L2) dramatically reduces upstream DNS load and latency.
 
-This project deploys dnsmasq as a daemon service on every Kubernetes node, providing:
-- **Node-local DNS caching** - reduces latency and external DNS queries
-- **Two-layer caching architecture** - CoreDNS (L1) + dnsmasq (L2)
-- **Upstream DNS resilience** - survives temporary upstream DNS outages
-- **Per-node observability** - query logging on each node
+## What It Does
+
+- Deploys dnsmasq as a daemon service on every Kubernetes node (port 53)
+- Resolves `api.<domain>`, `api-int.<domain>`, and `*.apps.<domain>` locally via address records
+- Caches all DNS queries at the node level (TTL-based, configurable cache size)
+- Forwards non-cached queries to upstream DNS as usual
+- CoreDNS (L1, 10s) + dnsmasq (L2, TTL-based) provides two-layer caching
+- Survives upstream DNS outages — cluster infrastructure domains keep resolving
 
 ## Architecture
 
 ```
 ┌──────────── Node ────────────┐
 │                              │
-│  Pod → CoreDNS Service       │
-│         (Cluster DNS)        │
-│             ↓                │
-│       CoreDNS Pod            │   ← Layer 1 cache (10s TTL)
-│         forwards to          │
-│       {$HOST_IP}:53          │
-│             ↓                │
-│       dnsmasq daemon         │   ← Layer 2 cache (TTL-based)
-│         port 53 (host)       │      forwards to upstream
-│             ↓                │
-│       Upstream DNS           │   ← 8.8.8.8, 8.8.4.4
+│  Pod -> CoreDNS Service      │
+│          (Cluster DNS)       │
+│              |               │
+│        CoreDNS Pod           │   <- Layer 1 cache (10s TTL)
+│          forwards to         │
+│        {$HOST_IP}:53         │
+│              |               │
+│        dnsmasq daemon        │   <- Layer 2 cache (TTL-based)
+│          port 53 (host)      │      address records for cluster domains
+│              |               │      forwards to upstream
+│        Upstream DNS          │   <- 8.8.8.8, 8.8.4.4
 │                              │
 └──────────────────────────────┘
 ```
 
-**Two-Layer Caching Benefits:**
-- **Layer 1 (CoreDNS)**: 10 second cache handles rapid query repeats
-- **Layer 2 (dnsmasq)**: TTL-based cache handles longer-term caching and reduces upstream load
+Each node has its own independent dnsmasq instance. If a node goes down, other nodes are unaffected.
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker or Podman
-- kind >= 0.20.0
-- kubectl >= 1.28.0
+- **Kind (local):** Docker or Podman, `make`
+- **Azure:** `az` CLI, `jq`, SSH
 
 ### Configuration
 
-Edit `config.env`:
+All settings are in `config.env`:
 
 ```bash
-CLUSTER_NAME=dnsmasq-test
+# Shared
+CLUSTER_NAME=dnsmasq
+DOMAIN=dnsmasq.local
 WORKER_COUNT=2
-CONTAINER_CLI=docker
+
+# Kind
+CONTAINER_CLI=podman
+
+# dnsmasq
 UPSTREAM_DNS="8.8.8.8,8.8.4.4"
 CACHE_SIZE=1000
+ENABLE_LOGGING=true
+
+# Azure
+RESOURCE_GROUP=${CLUSTER_NAME}-rg
+LOCATION=eastus
+VM_SIZE=Standard_D8s_v5
+# ... (see config.env for full list)
 ```
 
-### Run Demo
+Edit `config.env` before running any targets.
+
+### Kind (Local Demo)
 
 ```bash
 # Full lifecycle: create cluster + deploy dnsmasq + verify
 make demo
 
-# Show cluster status
-make status
+# Prove it survives upstream DNS failure
+make demo-failover
+
+# Deploy monitoring (Prometheus + Grafana)
+make monitoring
 
 # Tear down
 make clean
 ```
 
-**For detailed step-by-step walkthrough with expected outputs, see [DEMO.md](DEMO.md)**
+### Azure (Cloud Demo)
+
+```bash
+# Full lifecycle: create infra + install k3s + deploy dnsmasq + verify
+make azure-demo
+
+# Prove it survives Azure DNS failure (blocks 168.63.129.16)
+make azure-failover
+
+# Tear down (double confirms before destroying)
+make azure-clean
+```
 
 ## Make Targets
 
 | Target | Description |
 |---|---|
-| `make demo` | Full lifecycle (cluster + deploy + verify) |
+| `make demo` | Full Kind lifecycle (cluster + deploy + verify) |
+| `make demo-failover` | Upstream DNS failure simulation (Kind) |
+| `make monitoring` | Deploy Prometheus + Grafana |
 | `make status` | Show cluster and dnsmasq service status |
 | `make clean` | Delete Kind cluster |
-| `make prereqs` | Install kind and kubectl |
-| `make cluster-up` | Create Kind cluster only |
-| `make deploy` | Deploy dnsmasq service only |
-| `make verify` | Run DNS verification tests (includes caching) |
+| `make azure-demo` | Full Azure lifecycle (infra + k3s + deploy + verify) |
+| `make azure-failover` | Azure DNS failure simulation |
+| `make azure-status` | Show Azure cluster status |
+| `make azure-clean` | Destroy all Azure resources |
 
 Run `make help` for the complete list.
 
@@ -89,85 +120,96 @@ Run `make help` for the complete list.
 
 ### dnsmasq Configuration
 
-The dnsmasq daemon runs on each node with:
-- **Cache size**: Configurable (default: 1000 entries)
-- **Upstream DNS**: Multiple servers with automatic failover
-- **Query logging**: Optional (configurable via `ENABLE_LOGGING`)
-- **Port binding**: Listens on port 53 on all interfaces
-- **TCP support**: Required for CoreDNS forwarding with `force_tcp`
+Each node's dnsmasq is configured with:
 
-### Service Management
+1. **`api.<domain>`** and **`api-int.<domain>`** resolve to the control-plane IP (API server) via `address=` directives
+2. **`*.apps.<domain>`** resolves to the ingress IP (first worker) via wildcard `address=` directive
+3. **Everything else** is forwarded to upstream DNS and cached
 
-dnsmasq runs as a daemon process on each node, which means:
-- Installed via package manager (apt-get)
-- Runs directly on the node (not containerized)
-- Started with `/usr/sbin/dnsmasq`
+dnsmasq runs as a daemon service, which means:
+- Installed via package manager (not containerized)
+- Runs directly on the node with `/usr/sbin/dnsmasq`
 - Configured via `/etc/dnsmasq.conf`
-- One instance per node
+- One independent instance per node
+- Restarts are handled by the process manager
 
-### DNS Flow
+### Two-Layer Caching
 
-1. **Pod query** → Kubernetes DNS Service (ClusterIP)
-2. **CoreDNS** → Receives query, checks 10s cache
-3. **Cache miss** → CoreDNS forwards to `{$HOST_IP}:53` (dnsmasq on same node)
-4. **dnsmasq** → Checks TTL-based cache
-5. **Cache miss** → dnsmasq forwards to upstream (8.8.8.8)
-6. **Response** → Cached at both layers, returned to pod
+The DNS flow through two cache layers:
+
+1. **Pod query** -> Kubernetes DNS Service (ClusterIP)
+2. **CoreDNS** -> Receives query, checks 10s cache (L1)
+3. **Cache miss** -> CoreDNS forwards to `{$HOST_IP}:53` (dnsmasq on same node)
+4. **dnsmasq** -> Checks TTL-based cache (L2), serves address records for cluster domains
+5. **Cache miss** -> dnsmasq forwards to upstream (8.8.8.8)
+6. **Response** -> Cached at both layers, returned to pod
+
+### Observability
+
+A custom **dnsmasq-exporter** (Go) runs as a DaemonSet on every node and exports Prometheus metrics:
+
+- **CHAOS TXT queries** — dnsmasq exposes cache stats via DNS (hits, misses, cache size, insertions, evictions). The exporter queries these on each Prometheus scrape.
+- **Log file parsing** — tails `/var/log/dnsmasq.log` for query counts by type, forward destinations, and response sources (cached/forwarded/local).
+
+Metrics exported on `:9153`:
+- `dnsmasq_up` — dnsmasq responding (1/0)
+- `dnsmasq_cache_size`, `dnsmasq_cache_hits_total`, `dnsmasq_cache_misses_total`
+- `dnsmasq_cache_insertions_total`, `dnsmasq_cache_evictions_total`
+- `dnsmasq_queries_total{type}` — queries by DNS type (A, AAAA, etc.)
+- `dnsmasq_forwards_total{to}` — forwards by upstream server
+- `dnsmasq_responses_total{source}` — responses by source (cached/forwarded/local)
+
+The monitoring stack (Prometheus + Grafana) provides dashboards and alerting.
 
 ## Project Structure
 
 ```
 .
 ├── config.env                         # All configuration (edit this)
-├── Makefile                           # Kind targets
-├── README.md                          # This file
-├── DEMO.md                            # Step-by-step demo guide
-├── PROJECT-STRUCTURE.md               # Structure documentation
+├── Makefile                           # Kind + Azure + Monitoring targets
+├── demo.md                           # Step-by-step presenter guide
+├── exporter/                         # dnsmasq Prometheus exporter (Go)
+│   ├── main.go                       # CHAOS TXT collector + log parser
+│   ├── go.mod                        # Go module
+│   ├── go.sum                        # Dependency checksums
+│   └── Dockerfile                    # Multi-stage build
 ├── manifests/
-│   └── dnsmasq.conf.template          # dnsmasq configuration template
-└── scripts/
-    ├── common.sh                      # Shared utilities
-    ├── setup-kind.sh                  # Create Kind cluster
-    ├── deploy-dnsmasq.sh              # Deploy dnsmasq to nodes
-    └── verify-dns.sh                  # Verification tests
+│   └── dnsmasq.conf.template         # dnsmasq config (reference)
+├── monitoring/
+│   ├── dnsmasq-exporter.yaml         # Exporter DaemonSet (hostNetwork)
+│   ├── prometheus.yaml               # Prometheus + alerts + SLO rules
+│   ├── grafana.yaml                  # Grafana deployment
+│   └── grafana-dashboard.json        # dnsmasq observability dashboard
+├── scripts/                          # Kind scripts
+│   ├── common.sh                     # Shared utilities
+│   ├── setup-kind.sh                 # Create Kind cluster
+│   ├── deploy-dnsmasq.sh            # Deploy dnsmasq to Kind nodes
+│   ├── verify-dns.sh                # 7-test verification suite
+│   ├── demo-failover.sh             # Upstream failure simulation
+│   └── deploy-monitoring.sh         # Build exporter + deploy stack
+└── azure/                           # Azure scripts
+    ├── setup-azure.sh               # Create Azure infrastructure
+    ├── install-k3s.sh               # Install k3s on VMs
+    ├── deploy-dnsmasq-azure.sh      # Deploy dnsmasq to Azure VMs
+    ├── verify-dns-azure.sh          # Verification via SSH
+    ├── demo-failover-azure.sh       # Azure DNS failure simulation
+    └── teardown-azure.sh            # Destroy Azure resources
 ```
 
 ## Use Cases
 
-- **High-traffic clusters** - reduce external DNS queries and latency
-- **Cost optimization** - minimize cloud DNS query costs
-- **Network resilience** - survive temporary upstream DNS failures
-- **Air-gapped environments** - local DNS caching for limited connectivity
-- **Multi-cloud** - consistent DNS caching across providers
-- **Development/testing** - realistic DNS caching behavior in local clusters
-
-## Verification Tests
-
-The `make verify` target runs comprehensive tests:
-
-1. **dnsmasq service status** - Verify dnsmasq is running on all nodes
-2. **Node DNS resolution** - Each node can resolve external domains
-3. **Pod DNS resolution** - Pods can resolve via CoreDNS → dnsmasq
-4. **Cache verification** - Queries are cached at dnsmasq layer
-5. **Multi-node verification** - dnsmasq works on all nodes
-
-## Observability
-
-dnsmasq provides comprehensive query logging on each node at `/var/log/dnsmasq.log`. Logs show:
-- DNS queries received
-- Cache hits (`cached <domain>`)
-- Cache misses (`forwarded <domain> to <upstream>`)
-- Query responses with IPs
-
-**For detailed observability commands and examples, see [DEMO.md](DEMO.md#4-manual-exploration)**
+- **High-traffic clusters** — reduce external DNS queries and latency
+- **Cost optimization** — minimize cloud DNS query costs
+- **Regulated industries** (DORA, NIS2) requiring DNS resilience
+- **Air-gapped clusters** with limited external DNS access
+- **Edge / telco** deployments with unreliable connectivity
+- **Multi-cloud** environments needing consistent DNS caching
+- **Security-conscious** teams wanting to reduce DNS metadata exposure
 
 ## Technology
 
 - [dnsmasq](https://thekelleys.org.uk/dnsmasq/doc.html) — Lightweight DNS forwarder and cache
 - [CoreDNS](https://coredns.io/) — Kubernetes cluster DNS
 - [Kubernetes](https://kubernetes.io/) — Container orchestration
-- [kind](https://kind.sigs.k8s.io/) — Kubernetes in Docker
-
-## License
-
-Apache 2.0
+- [Prometheus](https://prometheus.io/) — Metrics and observability
+- [k3s](https://k3s.io/) — Lightweight Kubernetes (Azure path)
