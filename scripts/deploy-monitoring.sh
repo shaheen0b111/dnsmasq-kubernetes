@@ -21,7 +21,7 @@ load_project_config
 
 CLI="${CONTAINER_CLI:-podman}"
 KUBE_CONTEXT="kind-${CLUSTER_NAME}"
-EXPORTER_IMAGE="dnsmasq-exporter:latest"
+EXPORTER_IMAGE="docker.io/library/dnsmasq-exporter:latest"
 
 header "Monitoring Stack Deployment"
 
@@ -49,9 +49,17 @@ success "Image built: ${EXPORTER_IMAGE}"
 
 info "[2/5] Loading image into Kind cluster..."
 
-kind load docker-image "${EXPORTER_IMAGE}" --name "${CLUSTER_NAME}"
+EXPORTER_TAR="$(mktemp /tmp/dnsmasq-exporter-XXXXXX.tar)"
+trap "rm -f '${EXPORTER_TAR}'" EXIT
+${CLI} save -o "${EXPORTER_TAR}" "${EXPORTER_IMAGE}"
+kind load image-archive "${EXPORTER_TAR}" --name "${CLUSTER_NAME}"
 
 success "Image loaded into Kind."
+
+# ── Ensure monitoring namespace exists ──────────────────────────────
+
+kubectl create namespace monitoring --context "$KUBE_CONTEXT" --dry-run=client -o yaml | \
+    kubectl apply --context "$KUBE_CONTEXT" -f -
 
 # ── Deploy dnsmasq-exporter DaemonSet ───────────────────────────────
 
