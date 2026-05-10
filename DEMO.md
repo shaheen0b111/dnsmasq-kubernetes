@@ -152,7 +152,54 @@ Grafana dashboard includes:
 - Cache hits vs misses, insertions vs evictions
 - Forwards by upstream destination
 
-### Step 10: Generate DNS Traffic
+### Step 10: Deploy Demo Applications
+
+Deploy lightweight services to create real Kubernetes DNS entries for the demo:
+
+```bash
+make demo-apps
+```
+
+What happens:
+1. Creates a `demo-apps` namespace
+2. Deploys 4 services: `web-frontend`, `api-backend`, `redis-cache`, `postgres-db`
+3. Each gets a Kubernetes DNS name (e.g., `web-frontend.demo-apps.svc.cluster.local`)
+
+These services are resolved by **kube-dns** (standard Kubernetes DNS), NOT by dnsmasq. They demonstrate that adding a custom DNS layer doesn't interfere with normal Kubernetes service discovery.
+
+**Show the services:**
+
+```bash
+kubectl get svc -n demo-apps --context kind-dnsmasq
+```
+
+**Test DNS resolution from a node:**
+
+```bash
+# Cluster service DNS — resolved by kube-dns
+podman exec dnsmasq-worker dig +short web-frontend.demo-apps.svc.cluster.local
+podman exec dnsmasq-worker dig +short api-backend.demo-apps.svc.cluster.local
+
+# Custom domain — resolved by dnsmasq
+podman exec dnsmasq-worker dig +short api.dnsmasq.local
+```
+
+**Domains the traffic generator will query:**
+
+| Domain | Resolved by | DNS layer |
+|--------|-------------|-----------|
+| `api.dnsmasq.local` | dnsmasq | Custom (address record) |
+| `*.apps.dnsmasq.local` | dnsmasq | Custom (wildcard) |
+| `google.com` | Upstream (8.8.8.8) | Forwarded via dnsmasq |
+| `web-frontend.demo-apps.svc.cluster.local` | kube-dns | Kubernetes native |
+| `api-backend.demo-apps.svc.cluster.local` | kube-dns | Kubernetes native |
+| `redis-cache.demo-apps.svc.cluster.local` | kube-dns | Kubernetes native |
+| `postgres-db.demo-apps.svc.cluster.local` | kube-dns | Kubernetes native |
+| `kubernetes.default.svc.cluster.local` | kube-dns | Kubernetes native |
+
+The key point: cluster service queries (`*.svc.cluster.local`) never reach dnsmasq. They are invisible in the dnsmasq dashboards because kube-dns handles them before dnsmasq is involved. This proves the custom DNS layer is additive — it only handles the domains you configure and leaves everything else untouched.
+
+### Step 11: Generate DNS Traffic
 
 Start the traffic generator to populate dashboards with dense, realistic data:
 
@@ -188,7 +235,7 @@ Stop the generator:
 make traffic-stop
 ```
 
-### Step 11: Observe Dense Dashboards
+### Step 12: Observe Dense Dashboards
 
 After ~30 seconds of traffic, open the dashboards:
 
@@ -209,7 +256,7 @@ make prometheus-ui    # http://localhost:9090
 - **Forwards by Upstream** — shows queries going to `8.8.8.8` and `8.8.4.4`
 - **SLI / SLO panels** — availability and local resolution rate targets
 
-### Step 12: Trigger Alerts
+### Step 13: Trigger Alerts
 
 Override traffic parameters to deliberately fire specific alerts:
 
@@ -237,7 +284,7 @@ When done experimenting:
 make traffic-stop
 ```
 
-### Step 13: Show Cluster-Internal DNS Separation
+### Step 14: Show Cluster-Internal DNS Separation
 
 Demonstrate that Kubernetes service DNS (`.svc.cluster.local`) bypasses dnsmasq entirely and is handled by the default kube-dns CoreDNS:
 
@@ -259,7 +306,7 @@ The DNS resolution path:
 
 This proves that dnsmasq only adds a caching and self-hosted resolution layer for infrastructure domains. Native Kubernetes service discovery (`*.svc.cluster.local`) continues to work through kube-dns exactly as before.
 
-### Step 14: Explore Prometheus Metrics
+### Step 15: Explore Prometheus Metrics
 
 ```bash
 # In Prometheus UI (http://localhost:9090), try:
@@ -272,7 +319,7 @@ dnsmasq_forwards_total
 dnsmasq_responses_total
 ```
 
-### Step 15: Check Alerts
+### Step 16: Check Alerts
 
 In Prometheus UI -> Alerts:
 - `DnsmasqDown` (critical) — dnsmasq not responding for 1m
@@ -283,7 +330,7 @@ In Prometheus UI -> Alerts:
 - `DnsmasqNoQueries` (warning) — zero queries for 10m
 - `DnsmasqAvailabilitySLOBreach` (critical) — availability < 99.9% for 5m
 
-### Step 16: Cleanup
+### Step 17: Cleanup
 
 ```bash
 make clean
