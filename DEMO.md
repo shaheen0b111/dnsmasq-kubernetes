@@ -152,7 +152,114 @@ Grafana dashboard includes:
 - Cache hits vs misses, insertions vs evictions
 - Forwards by upstream destination
 
-### Step 10: Explore Prometheus Metrics
+### Step 10: Generate DNS Traffic
+
+Start the traffic generator to populate dashboards with dense, realistic data:
+
+```bash
+make traffic
+```
+
+What happens:
+1. Forks a background process that continuously sends DNS queries to all nodes
+2. Round-robins queries across control-plane + workers
+3. Prints periodic stats to a log file
+
+**Traffic categories (per batch, every 2 seconds):**
+
+| Category | Count | What it exercises |
+|----------|-------|-------------------|
+| Local domains (`api.*`, `*.apps.*`) | 10 | dnsmasq address records, `responses{source=local}`, query types (A/AAAA/MX/TXT) |
+| Repeated external (`google.com`, etc.) | 8 | Cache hits, `responses{source=cached}` |
+| Unique external (`rnd-N.fwd.test`) | 5 | Cache misses, `forwards_total{to=8.8.8.8}` |
+| NXDOMAIN (`nx-N.nxdomain.test`) | 3 | Error responses, ~11% NXDOMAIN rate |
+| Cache eviction flood | 0 (opt-in) | Set `TRAFFIC_EVICT_COUNT=50` to trigger evictions |
+| Cluster-internal (`kubernetes.default.svc`, etc.) | 3 | Resolved by kube-dns, NOT dnsmasq — shows separation |
+
+Watch the live log:
+
+```bash
+tail -f /tmp/dns-traffic-dnsmasq.log
+```
+
+Stop the generator:
+
+```bash
+make traffic-stop
+```
+
+### Step 11: Observe Dense Dashboards
+
+After ~30 seconds of traffic, open the dashboards:
+
+```bash
+# Terminal 1:
+make grafana-ui       # http://localhost:3000
+
+# Terminal 2:
+make prometheus-ui    # http://localhost:9090
+```
+
+**In Grafana** — navigate to Dashboards -> dnsmasq dashboard. Panels to highlight:
+
+- **Total QPS** — shows sustained query rate across nodes
+- **Responses by Source** — three distinct lines: `local` (address records), `cached` (repeat queries), `forwarded` (external domains). This is the key chart: it shows dnsmasq handling three different query paths.
+- **Queries by Type** — A, AAAA, MX, TXT breakdown from the traffic mix
+- **Cache Hit Rate** — should be ~69% with default settings (18 hits vs 8 misses per batch)
+- **Forwards by Upstream** — shows queries going to `8.8.8.8` and `8.8.4.4`
+- **SLI / SLO panels** — availability and local resolution rate targets
+
+### Step 12: Trigger Alerts
+
+Override traffic parameters to deliberately fire specific alerts:
+
+```bash
+# First stop the default traffic
+make traffic-stop
+
+# Trigger DnsmasqCacheHitRateLow (<50% cache hit rate for 10m):
+TRAFFIC_LOCAL_COUNT=2 TRAFFIC_CACHED_COUNT=2 TRAFFIC_FORWARD_COUNT=20 make traffic
+
+# Trigger DnsmasqHighForwardRate (>100 forwards/s for 5m):
+# make traffic-stop first, then:
+# TRAFFIC_FORWARD_COUNT=30 TRAFFIC_INTERVAL=0.2 make traffic
+
+# Trigger DnsmasqCacheEvictionsHigh (>10 evictions/s for 5m):
+# make traffic-stop first, then:
+# TRAFFIC_EVICT_COUNT=100 TRAFFIC_INTERVAL=1 make traffic
+```
+
+In Prometheus UI -> Alerts, watch the alert state transition from `inactive` -> `pending` -> `firing`.
+
+When done experimenting:
+
+```bash
+make traffic-stop
+```
+
+### Step 13: Show Cluster-Internal DNS Separation
+
+Demonstrate that Kubernetes service DNS (`.svc.cluster.local`) bypasses dnsmasq entirely and is handled by the default kube-dns CoreDNS:
+
+```bash
+# Query a Kubernetes service — resolved by kube-dns, NOT dnsmasq
+podman exec dnsmasq-worker dig +short kubernetes.default.svc.cluster.local
+
+# Query a custom domain — resolved by dnsmasq
+podman exec dnsmasq-worker dig +short api.dnsmasq.local
+
+# Check dnsmasq logs — the kubernetes.default query does NOT appear
+podman exec dnsmasq-worker tail -20 /var/log/dnsmasq.log | grep -c "kubernetes.default" || echo "0 matches — kube-dns handled it"
+podman exec dnsmasq-worker tail -20 /var/log/dnsmasq.log | grep "api.dnsmasq" | tail -3
+```
+
+The DNS resolution path:
+- `kubernetes.default.svc.cluster.local` → CoreDNS (kube-dns) → Kubernetes plugin → ClusterIP answer. **dnsmasq never sees this query.**
+- `api.dnsmasq.local` → CoreDNS (kube-dns) → forwards to `{$HOST_IP}:53` → dnsmasq → address record answer. **dnsmasq handles this.**
+
+This proves that dnsmasq only adds a caching and self-hosted resolution layer for infrastructure domains. Native Kubernetes service discovery (`*.svc.cluster.local`) continues to work through kube-dns exactly as before.
+
+### Step 14: Explore Prometheus Metrics
 
 ```bash
 # In Prometheus UI (http://localhost:9090), try:
@@ -165,7 +272,7 @@ dnsmasq_forwards_total
 dnsmasq_responses_total
 ```
 
-### Step 11: Check Alerts
+### Step 15: Check Alerts
 
 In Prometheus UI -> Alerts:
 - `DnsmasqDown` (critical) — dnsmasq not responding for 1m
@@ -176,7 +283,7 @@ In Prometheus UI -> Alerts:
 - `DnsmasqNoQueries` (warning) — zero queries for 10m
 - `DnsmasqAvailabilitySLOBreach` (critical) — availability < 99.9% for 5m
 
-### Step 12: Cleanup
+### Step 16: Cleanup
 
 ```bash
 make clean
