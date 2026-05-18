@@ -20,3 +20,6 @@ coredns-backup.yaml
 *.swp
 *.swo
 *~
+
+# metedata
+DEMO.md
