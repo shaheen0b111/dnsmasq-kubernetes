@@ -138,10 +138,10 @@ Builds the dnsmasq-exporter image, loads it into Kind, and deploys:
 
 ```bash
 # Access Prometheus
-make prometheus-ui    # http://localhost:9090
+make prometheus-ui    # http://localhost:9091
 
 # Access Grafana
-make grafana-ui       # http://localhost:3000
+make grafana-ui       # http://localhost:3001
 ```
 
 Grafana dashboard includes:
@@ -241,10 +241,10 @@ After ~30 seconds of traffic, open the dashboards:
 
 ```bash
 # Terminal 1:
-make grafana-ui       # http://localhost:3000
+make grafana-ui       # http://localhost:3001
 
 # Terminal 2:
-make prometheus-ui    # http://localhost:9090
+make prometheus-ui    # http://localhost:9091
 ```
 
 **In Grafana** — navigate to Dashboards -> dnsmasq dashboard. Panels to highlight:
@@ -309,7 +309,7 @@ This proves that dnsmasq only adds a caching and self-hosted resolution layer fo
 ### Step 15: Explore Prometheus Metrics
 
 ```bash
-# In Prometheus UI (http://localhost:9090), try:
+# In Prometheus UI (http://localhost:9091), try:
 dnsmasq_up
 dnsmasq_cache_size
 dnsmasq_cache_hits_total
@@ -330,7 +330,56 @@ In Prometheus UI -> Alerts:
 - `DnsmasqNoQueries` (warning) — zero queries for 10m
 - `DnsmasqAvailabilitySLOBreach` (critical) — availability < 99.9% for 5m
 
-### Step 17: Cleanup
+### Step 17: Simulate a dnsmasq Instance Failure
+
+**What to do:** Stop dnsmasq on one node to watch the Grafana "Instances Up" gauge drop from 3 to 2.
+
+> **Note:** dnsmasq runs as a standalone daemon (not managed by systemd), so `systemctl stop dnsmasq` will not work. You must kill the process by PID.
+
+**Find the PID and kill it:**
+
+```bash
+# Find the dnsmasq PID on a worker node
+podman exec dnsmasq-worker pidof dnsmasq
+
+# Kill dnsmasq (replace <PID> with the actual PID from above)
+podman exec dnsmasq-worker kill <PID>
+```
+
+**Verify it's gone:**
+
+```bash
+# Should return nothing — port 53 is no longer bound
+podman exec dnsmasq-worker ss -ulnp | grep :53
+```
+
+**Observe the dashboard:**
+
+- Wait 15-30 seconds for the next Prometheus scrape
+- The **Instances Up** gauge drops from **3 → 2**
+- The `DnsmasqDown` alert transitions to `pending`, then `firing` after 1 minute
+
+**What to say:**
+
+> "I just killed the dnsmasq process on one worker. The Instances Up gauge drops to 2, and the DnsmasqDown alert fires within a minute. In production, this would page your oncall team. The other two nodes are unaffected — they each run their own independent dnsmasq instance."
+
+**Restore dnsmasq:**
+
+```bash
+podman exec dnsmasq-worker /usr/sbin/dnsmasq
+```
+
+Verify it's back:
+
+```bash
+podman exec dnsmasq-worker ss -ulnp | grep :53
+```
+
+The dashboard should return to 3 instances on the next scrape.
+
+---
+
+### Step 18: Cleanup
 
 ```bash
 make clean

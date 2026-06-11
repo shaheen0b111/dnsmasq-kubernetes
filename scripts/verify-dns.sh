@@ -55,16 +55,16 @@ if [ -z "$NODES" ]; then
 fi
 
 # Install dig if needed on all nodes
-echo "$NODES" | while read -r NODE; do
+while read -r NODE; do
     $CLI exec "$NODE" sh -c "command -v dig >/dev/null 2>&1" 2>/dev/null || \
         $CLI exec "$NODE" sh -c \
             "apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsutils >/dev/null 2>&1" \
             2>/dev/null || true
-done
+done <<< "$NODES"
 
 # ── Run 7 tests per node ────────────────────────────────────────────────
 
-echo "$NODES" | while read -r NODE; do
+while read -r NODE; do
     NODE_IP=$($CLI inspect "$NODE" \
         --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null)
 
@@ -139,7 +139,7 @@ echo "$NODES" | while read -r NODE; do
     fi
 
     echo ""
-done
+done <<< "$NODES"
 
 # ── Summary ──────────────────────────────────────────────────────────────
 
