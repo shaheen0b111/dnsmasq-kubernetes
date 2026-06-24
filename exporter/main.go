@@ -36,12 +36,14 @@ var (
 	listenAddr  string
 	dnsmasqAddr string
 	logPath     string
+	mode        string
 )
 
 func init() {
 	flag.StringVar(&listenAddr, "listen-addr", ":9153", "Address to listen on for metrics")
 	flag.StringVar(&dnsmasqAddr, "dnsmasq-addr", "127.0.0.1:53", "dnsmasq DNS address for CHAOS TXT queries")
 	flag.StringVar(&logPath, "log-path", "/var/log/dnsmasq.log", "Path to dnsmasq query log")
+	flag.StringVar(&mode, "mode", "full", "Exporter mode: basic (CHAOS TXT only) or full (CHAOS + log parsing)")
 }
 
 // ---------------------------------------------------------------------------
@@ -252,16 +254,22 @@ func followLog(path string) error {
 func main() {
 	flag.Parse()
 
+	if mode != "basic" && mode != "full" {
+		log.Fatalf("invalid --mode=%q: must be 'basic' or 'full'", mode)
+	}
+
 	// Register CHAOS TXT collector (queried on each scrape)
 	prometheus.MustRegister(newChaosCollector(dnsmasqAddr))
 
-	// Register log-based counters (updated continuously in background)
-	prometheus.MustRegister(queriesTotal)
-	prometheus.MustRegister(forwardsTotal)
-	prometheus.MustRegister(responsesTotal)
+	if mode == "full" {
+		// Register log-based counters (updated continuously in background)
+		prometheus.MustRegister(queriesTotal)
+		prometheus.MustRegister(forwardsTotal)
+		prometheus.MustRegister(responsesTotal)
 
-	// Start log tailer in background
-	go tailLog(logPath)
+		// Start log tailer in background
+		go tailLog(logPath)
+	}
 
 	// HTTP server
 	http.Handle("/metrics", promhttp.Handler())
@@ -269,8 +277,10 @@ func main() {
 		fmt.Fprintf(w, `<html><body><h1>dnsmasq Exporter</h1><p><a href="/metrics">Metrics</a></p></body></html>`)
 	})
 
-	log.Printf("dnsmasq-exporter listening on %s", listenAddr)
+	log.Printf("dnsmasq-exporter listening on %s (mode=%s)", listenAddr, mode)
 	log.Printf("  dnsmasq: %s", dnsmasqAddr)
-	log.Printf("  log:     %s", logPath)
+	if mode == "full" {
+		log.Printf("  log:     %s", logPath)
+	}
 	log.Fatal(http.ListenAndServe(listenAddr, nil))
 }

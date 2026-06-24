@@ -65,9 +65,13 @@ for VM in $ALL_VMS; do
     echo ""
     info "--- Deploying to ${VM} (${PRIV_IP}) ---"
 
-    # Discover upstream DNS on the VM
+    # Discover upstream DNS (use saved backup if available to avoid loop on re-deploy)
     UPSTREAM=$(ssh_exec "$PUB_IP" \
-        "grep '^nameserver' /etc/resolv.conf | head -1 | awk '{print \$2}'" 2>/dev/null || echo "")
+        "grep '^nameserver' /etc/resolv.conf.upstream 2>/dev/null | head -1 | awk '{print \$2}'" 2>/dev/null || echo "")
+    if [ -z "$UPSTREAM" ]; then
+        UPSTREAM=$(ssh_exec "$PUB_IP" \
+            "grep '^nameserver' /etc/resolv.conf | head -1 | awk '{print \$2}'" 2>/dev/null || echo "")
+    fi
 
     # On Azure, the upstream is typically 168.63.129.16 (Azure DNS wire server)
     if [ -z "$UPSTREAM" ]; then

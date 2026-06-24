@@ -124,31 +124,8 @@ data:
           summary: "High cache eviction rate on {{ $labels.node }}"
           description: "dnsmasq on {{ $labels.node }} is evicting more than 10 entries/sec. Consider increasing cache size. Current: {{ $value | humanize }}/s."
 
-    - name: dnsmasq.queries
-      rules:
-      - alert: DnsmasqHighForwardRate
-        expr: |
-          sum by (node) (rate(dnsmasq_forwards_total{job="dnsmasq"}[5m])) > 100
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "High forward rate on {{ $labels.node }}"
-          description: "dnsmasq on {{ $labels.node }} is forwarding more than 100 queries/sec to upstream. This may indicate low cache effectiveness. Current: {{ $value | humanize }}/s."
-
-      - alert: DnsmasqNoQueries
-        expr: |
-          rate(dnsmasq_queries_total{job="dnsmasq"}[5m]) == 0
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "No DNS queries on {{ $labels.node }}"
-          description: "dnsmasq on {{ $labels.node }} has received no queries for 10 minutes. This may indicate a DNS routing issue."
-
     - name: dnsmasq.slo
       rules:
-      # SLI: Cache effectiveness — fraction of responses served from cache or local
       - record: dnsmasq:cache_hit_ratio:rate5m
         expr: |
           rate(dnsmasq_cache_hits_total{job="dnsmasq"}[5m])
@@ -159,7 +136,6 @@ data:
             rate(dnsmasq_cache_misses_total{job="dnsmasq"}[5m])
           )
 
-      # SLO breach: dnsmasq availability drops (exporter can't reach dnsmasq)
       - alert: DnsmasqAvailabilitySLOBreach
         expr: avg_over_time(dnsmasq_up{job="dnsmasq"}[5m]) < 0.999
         for: 5m

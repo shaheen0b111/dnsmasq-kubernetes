@@ -265,70 +265,68 @@ echo ""
 echo -e "  kubernetes.default in dnsmasq logs (all nodes): ${_GREEN}${K8S_COUNT} (kube-dns handled it)${_RESET}"
 echo -e "  api.${DOMAIN} in dnsmasq logs (all nodes):  ${_GREEN}${CUSTOM_COUNT} (dnsmasq handled it)${_RESET}"
 
-pause "Next: Prometheus metrics"
+pause "Next: Prometheus metrics & Grafana dashboard"
 
 # ═══════════════════════════════════════════════════════════════════
-#  7. Raw Prometheus Metrics
+#  7. Native Prometheus Metrics & Grafana Dashboard
 # ═══════════════════════════════════════════════════════════════════
 
-header "7. Prometheus Metrics (from dnsmasq-exporter)"
+header "7. Native Prometheus Metrics & Grafana Dashboard"
 
-echo "  Each node runs a dnsmasq-exporter that exposes metrics on :9153."
-echo "  Key metrics: dnsmasq_up, cache hits/misses, queries, forwards."
+echo "  Each node runs a dnsmasq-exporter in basic mode. It queries dnsmasq"
+echo "  via CHAOS TXT DNS records — a protocol built into dnsmasq for"
+echo "  exposing internal statistics. No log parsing needed."
+echo ""
+echo "  These metrics are natively available from any dnsmasq instance:"
+echo "    dnsmasq_up                     — responding (1/0)"
+echo "    dnsmasq_cache_size             — configured cache size"
+echo "    dnsmasq_cache_hits_total       — cache hits"
+echo "    dnsmasq_cache_misses_total     — cache misses"
+echo "    dnsmasq_cache_insertions_total — cache insertions"
+echo "    dnsmasq_cache_evictions_total  — cache evictions"
 echo ""
 show_cmd "${CLI} exec ${CP_NODE} curl -s http://127.0.0.1:9153/metrics | grep dnsmasq_"
 
 pause
 
 echo ""
-$CLI exec "$CP_NODE" curl -s http://127.0.0.1:9153/metrics 2>/dev/null | grep -E "^dnsmasq_(up|cache_size|cache_hits|cache_misses|queries_total|forwards_total|responses_total)" | head -20
+$CLI exec "$CP_NODE" curl -s http://127.0.0.1:9153/metrics 2>/dev/null | grep -E "^dnsmasq_(up|cache_size|cache_hits|cache_misses|cache_insertions|cache_evictions)" | head -20
 
-pause "Next: dashboards"
+echo ""
+echo "  You can also query these directly via dig:"
+echo ""
+show_cmd "${CLI} exec ${CP_NODE} dig +short cachesize.bind TXT CH @127.0.0.1"
 
-# ═══════════════════════════════════════════════════════════════════
-#  8. Dashboards
-# ═══════════════════════════════════════════════════════════════════
+pause
 
-header "8. Grafana & Prometheus Dashboards"
+echo -n "  cachesize.bind  = "
+$CLI exec "$CP_NODE" dig +short cachesize.bind TXT CH @127.0.0.1 2>/dev/null
+echo -n "  hits.bind       = "
+$CLI exec "$CP_NODE" dig +short hits.bind TXT CH @127.0.0.1 2>/dev/null
+echo -n "  misses.bind     = "
+$CLI exec "$CP_NODE" dig +short misses.bind TXT CH @127.0.0.1 2>/dev/null
 
+echo ""
+echo "  The Grafana dashboard shows only these native CHAOS TXT metrics."
 echo "  Port-forwards should already be running from 'make demo'."
 echo ""
 echo -e "  ${_BOLD}Grafana:${_RESET}     http://localhost:${GRAFANA_PORT}"
-echo "               Navigate to Dashboards -> dnsmasq dashboard"
+echo "               Navigate to Dashboards -> dnsmasq DNS — Native Metrics"
 echo ""
 echo -e "  ${_BOLD}Prometheus:${_RESET}  http://localhost:${PROMETHEUS_PORT}"
 echo "               Navigate to Alerts to see configured alert rules"
 echo ""
-echo "  Key Grafana panels: Total QPS, Instances Up, Cache Hit Rate,"
-echo "  Responses by Source (local/cached/forwarded), Queries by Type."
-
-pause "Next: DNS failover demo"
-
-# ═══════════════════════════════════════════════════════════════════
-#  9. DNS Failover
-# ═══════════════════════════════════════════════════════════════════
-
-header "9. DNS Failover Demo"
-
-echo "  This runs the interactive failover script that blocks upstream DNS"
-echo "  and proves cluster domains survive the outage."
+echo "  Dashboard panels (all from native CHAOS TXT metrics):"
+echo "    - Instances Up            — count of nodes where dnsmasq_up == 1"
+echo "    - Cache Hit Rate          — hits / (hits + misses)"
+echo "    - Cache Size              — configured size per node"
+echo "    - Availability            — avg_over_time(dnsmasq_up)"
+echo "    - Cache Evictions/s       — rate of evictions"
+echo "    - Hits vs Misses          — time series"
+echo "    - Insertions vs Evictions — time series"
+echo "    - Cache Counters          — absolute values"
 echo ""
-show_cmd "make -C ${REPO_DIR} demo-failover"
-
-pause "Run the failover demo?"
-
-"${SCRIPT_DIR}/demo-failover.sh"
-
-pause "Next: traffic generation"
-
-# ═══════════════════════════════════════════════════════════════════
-#  10. Traffic Generation
-# ═══════════════════════════════════════════════════════════════════
-
-header "10. DNS Traffic Generation"
-
-echo "  Start continuous DNS traffic to populate the Grafana dashboard"
-echo "  with dense, realistic data across all nodes."
+echo "  Now let's start DNS traffic to see the dashboard come alive."
 echo ""
 echo "  Traffic mix per batch (every 2s):"
 echo "    10 local domains, 8 cached external, 5 unique external,"
@@ -343,19 +341,21 @@ make -C "$REPO_DIR" traffic
 echo ""
 echo -e "  ${_BOLD}Check the Grafana dashboard now:${_RESET} http://localhost:${GRAFANA_PORT}"
 echo ""
-echo "  Watch for:"
-echo "    - Total QPS increasing"
-echo "    - Responses by Source: local, cached, forwarded lines diverging"
-echo "    - Cache Hit Rate stabilizing around 60-70%"
-echo "    - Queries by Type: A, AAAA, MX, TXT breakdown"
+echo "  With basic monitoring, you can see the dashboard changing:"
+echo "    - Cache Hit Rate increasing as queries flow"
+echo "    - Cache Hits vs Misses diverging"
+echo "    - Cache Insertions counting up"
+echo ""
+echo "  But notice what's missing — there's no QPS, no query type breakdown,"
+echo "  no forwarding stats. Those require log parsing (we'll add that later)."
 
 pause "Next: instance failure simulation"
 
 # ═══════════════════════════════════════════════════════════════════
-#  11. Instance Failure Simulation
+#  8. Instance Failure Simulation
 # ═══════════════════════════════════════════════════════════════════
 
-header "11. Instance Failure — Grafana Dashboard Impact"
+header "8. Instance Failure — Grafana Dashboard Impact"
 
 echo "  We'll kill dnsmasq on the worker node and watch the Grafana"
 echo "  'Instances Up' gauge drop from 3 to 2."
@@ -421,11 +421,57 @@ else
     echo "  Grafana 'Instances Up' should return to 3 on the next scrape."
 fi
 
+pause "Next: upgrade to full monitoring"
+
 # ═══════════════════════════════════════════════════════════════════
-#  12. Stop Traffic & Wrap Up
+#  9. Upgrade to Full Monitoring
 # ═══════════════════════════════════════════════════════════════════
 
-header "12. Wrap Up"
+header "9. Upgrade to Full Monitoring (CHAOS TXT + Log Parsing)"
+
+echo "  The basic exporter only uses CHAOS TXT queries — no log access needed."
+echo "  Now we'll upgrade to the full exporter that also parses /var/log/dnsmasq.log"
+echo "  to derive additional metrics:"
+echo ""
+echo "  Log-derived metrics (not available natively):"
+echo "    dnsmasq_queries_total{type}     — queries by type (A, AAAA, etc.)"
+echo "    dnsmasq_forwards_total{to}      — forwards by upstream server"
+echo "    dnsmasq_responses_total{source} — responses (cached/forwarded/local)"
+echo ""
+show_cmd "make -C ${REPO_DIR} monitoring-upgrade"
+
+pause "Upgrade monitoring?"
+
+make -C "$REPO_DIR" monitoring-upgrade
+
+echo ""
+echo "  The exporter now runs in full mode with log parsing."
+echo "  Verify the new metrics are available:"
+echo ""
+show_cmd "${CLI} exec ${CP_NODE} curl -s http://127.0.0.1:9153/metrics | grep dnsmasq_"
+
+pause
+
+echo ""
+$CLI exec "$CP_NODE" curl -s http://127.0.0.1:9153/metrics 2>/dev/null | grep -E "^dnsmasq_(up|cache_size|cache_hits|cache_misses|cache_insertions|cache_evictions|queries_total|forwards_total|responses_total)" | head -25
+
+echo ""
+echo -e "  ${_BOLD}Refresh Grafana now:${_RESET} http://localhost:${GRAFANA_PORT}"
+echo ""
+echo "  New panels visible on the full dashboard:"
+echo "    - Total QPS                — aggregate queries per second"
+echo "    - Queries by Type          — A, AAAA, etc. breakdown"
+echo "    - Responses by Source      — cached / forwarded / local"
+echo "    - Queries by Node          — per-node query rate"
+echo "    - Forwards by Upstream     — which upstream servers are used"
+
+pause "Next: wrap up"
+
+# ═══════════════════════════════════════════════════════════════════
+#  10. Stop Traffic & Wrap Up
+# ═══════════════════════════════════════════════════════════════════
+
+header "10. Wrap Up"
 
 echo "  Stopping the traffic generator and cleaning up."
 show_cmd "make -C ${REPO_DIR} traffic-stop"

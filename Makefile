@@ -9,7 +9,8 @@ export KIND_EXPERIMENTAL_PROVIDER := $(CONTAINER_CLI)
 .PHONY: help prereqs cluster-up deploy verify demo demo-failover walkthrough status clean \
         traffic traffic-stop \
         demo-apps demo-apps-clean dns-test \
-        monitoring prometheus-ui grafana-ui port-forward port-forward-stop \
+        monitoring monitoring-basic monitoring-full monitoring-upgrade \
+        prometheus-ui grafana-ui port-forward port-forward-stop \
         azure-infra azure-cluster azure-deploy azure-verify azure-failover \
         azure-demo azure-status azure-clean
 
@@ -28,7 +29,7 @@ help: ## Show available targets
 	@echo ""
 	@echo "  Monitoring:"
 	@grep -E '^(monitoring|prometheus-|grafana-)[a-zA-Z_-]*:.*?## .*$$' $(MAKEFILE_LIST) | \
-	    awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+	    awk 'BEGIN {FS = ":.*?## "}; {printf "    \033[36m%-22s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "  Azure:"
 	@grep -E '^azure-[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -66,7 +67,7 @@ verify: ## Run DNS verification tests on all nodes
 	@chmod +x scripts/verify-dns.sh
 	@./scripts/verify-dns.sh
 
-demo: cluster-up deploy verify demo-apps dns-test monitoring port-forward ## Full demo: cluster, dnsmasq, apps, monitoring, dashboards
+demo: cluster-up deploy verify demo-apps dns-test monitoring-basic port-forward ## Full demo: cluster, dnsmasq, apps, basic monitoring, dashboards
 
 walkthrough: ## Interactive feature walkthrough (run after 'make demo')
 	@chmod +x scripts/walkthrough.sh
@@ -135,9 +136,19 @@ dns-test: ## Create a DNS test pod for interactive queries
 #  Monitoring targets
 # ═══════════════════════════════════════════════════════════════════
 
-monitoring: ## Deploy Prometheus + Grafana monitoring stack
+monitoring: monitoring-basic ## Deploy monitoring stack (default: basic mode)
+
+monitoring-basic: ## Deploy basic monitoring (native CHAOS TXT metrics only)
 	@chmod +x scripts/deploy-monitoring.sh
-	@./scripts/deploy-monitoring.sh
+	@./scripts/deploy-monitoring.sh basic
+
+monitoring-full: ## Deploy full monitoring (CHAOS TXT + log-based metrics)
+	@chmod +x scripts/deploy-monitoring.sh
+	@./scripts/deploy-monitoring.sh full
+
+monitoring-upgrade: ## Upgrade monitoring from basic to full (adds log-based metrics)
+	@chmod +x scripts/upgrade-monitoring.sh
+	@./scripts/upgrade-monitoring.sh
 
 prometheus-ui: ## Open Prometheus UI (foreground, port-forward)
 	@echo "Prometheus available at http://localhost:$(PROMETHEUS_PORT)"
